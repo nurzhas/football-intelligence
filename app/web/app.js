@@ -146,7 +146,7 @@ function renderLineup(svg) {
     const fill = w ? css("--surface-1") : score == null ? css("--neutral") : divColor(score);
     const txt = w ? css("--text-primary") : inkOn(score);
     const sel = S.slot === i, pin = i in S.fixed && !w, num = w ? fmt(w.fit) : score == null ? "—" : fmt(score);
-    const label = (y) => `<text y="${y}" text-anchor="middle" font-size="2" fill="${nm.cand ? "var(--series-1)" : "var(--text-primary)"}" font-weight="${nm.cand ? 700 : 500}" paint-order="stroke" stroke="var(--pitch)" stroke-width=".5">${esc(nm.text)}</text>`;
+    const tag = (y) => `<text y="${y}" text-anchor="middle" font-size="2" fill="${nm.cand ? "var(--series-1)" : "var(--text-primary)"}" font-weight="${nm.cand ? 700 : 500}" paint-order="stroke" stroke="var(--pitch)" stroke-width=".5">${esc(nm.text)}</text>`;
     const url = w ? null : slotPhoto(s);
     if (url) { photos++; shown ||= PHOTOS.get(url) === true; }
     // two looks: the score circle, and the player's photo with the score in a badge - shown once the photo has
@@ -160,7 +160,7 @@ function renderLineup(svg) {
         ${pin ? `<circle r=".8" cx="2.6" cy="-2.6" fill="var(--text-secondary)"><title>закреплён</title></circle>` : ""}
         <circle r="3.1" fill="${fill}" stroke="${w ? "var(--series-1)" : "var(--surface-1)"}" stroke-width="${w ? ".65" : ".5"}" ${w ? `stroke-dasharray="1 .7"` : ""}/>
         <text y=".8" text-anchor="middle" font-size="2.3" font-weight="700" fill="${txt}">${num}</text>
-        ${label(5.6)}
+        ${tag(5.6)}
       </g>
       ${url ? `<g class="face">
         <circle class="hit" r="${r + 1.6}"/>
@@ -172,7 +172,7 @@ function renderLineup(svg) {
         <circle r="${r - .25}" fill="none" stroke="${fill}" stroke-width=".5"/>
         <rect x="${bx - 2.3}" y="${by - 2.3}" width="4.6" height="4.6" rx="2.3" fill="${fill}" stroke="var(--pitch)" stroke-width=".35"/>
         <text x="${bx}" y="${by + .8}" text-anchor="middle" font-size="2.3" font-weight="700" fill="${txt}">${num}</text>
-        ${label(r + 3.2)}
+        ${tag(r + 3.2)}
       </g>` : ""}
     </g>`;
   }).join("");
@@ -188,7 +188,7 @@ function renderLineup(svg) {
     <span><span class="dot" style="background:${divColor(85)}"></span> сильнее</span>
     <span><svg width="14" height="14" viewBox="-7 -7 14 14"><circle r="5.5" fill="none" stroke="var(--ring)" stroke-width="1.2"/></svg> потребность</span>
     ${Object.keys(S.whatIf).length ? `<span><svg width="14" height="14" viewBox="-7 -7 14 14"><circle r="5" fill="none" stroke="var(--series-1)" stroke-width="1.4" stroke-dasharray="2 1.5"/></svg> кандидат «что если», число — соответствие</span>` : ""}
-    ${photos ? `<span class="muted" id="photo-credit"${shown ? "" : " hidden"}>фото: Transfermarkt</span>` : ""}`;
+    ${photos ? `<span class="muted" id="photo-credit" title="Фото сегодняшние, а не лета 2016"${shown ? "" : " hidden"}>фото: Transfermarkt (нынешние)</span>` : ""}`;
   noteLineup();
 }
 
@@ -226,30 +226,51 @@ function noteLineup() {
     `Средние позиции игроков в схеме ${fmtFormation(S.club.formation)}. Нажмите на игрока — статистика и замены; перетащите — команда перестроится так, как в среднем стояли команды в реальных матчах.`;
 }
 
-function declutter(pts, w = 10.5, h = 7) {
-  // display only: slots with almost the same average spot (a front two) would hide each other and their
-  // names, so circles closer than a label's width side by side (or a node's height one above the other)
-  // are pushed apart a little; the numbers behind them do not change
-  const q = pts.map(([x, y]) => [x / w, y / h]);
-  for (let it = 0; it < 60; it++) {
+function nodeShapes(svg) {
+  // what each node draws, around its centre: the circle (photo or score) and the boxes of its name and badge
+  const shapes = [];
+  $$(".node", svg).forEach((n) => {
+    const pic = n.classList.contains("pic"), g = $(pic ? ".face" : ".plain", n), t = $$("text", g);
+    const box = (e) => { const b = e.getBBox(); return [b.x, b.y, b.x + b.width, b.y + b.height]; };
+    shapes[+n.dataset.i] = { r: pic ? FACE.r + .8 : 4, boxes: pic ? [box(t[t.length - 1]), box($("rect", g))] : [box(t[t.length - 1])] };
+  });
+  return shapes;
+}
+
+function overlap(a, sa, b, sb) {
+  const at = (p, r) => [p[0] + r[0], p[1] + r[1], p[0] + r[2], p[1] + r[3]];
+  const boxes = (u, v) => u[0] < v[2] && v[0] < u[2] && u[1] < v[3] && v[1] < u[3];
+  const boxCircle = (u, c, r) => Math.hypot(Math.max(u[0] - c[0], 0, c[0] - u[2]), Math.max(u[1] - c[1], 0, c[1] - u[3])) < r;
+  if (Math.hypot(a[0] - b[0], a[1] - b[1]) < sa.r + sb.r) return true;
+  const A = sa.boxes.map((r) => at(a, r)), B = sb.boxes.map((r) => at(b, r));
+  return A.some((u) => boxCircle(u, b, sb.r) || B.some((v) => boxes(u, v))) || B.some((v) => boxCircle(v, a, sa.r));
+}
+
+function declutter(pts, shapes) {
+  // display only: nodes whose circles, names or badges would cover each other (a front two, a crowded midfield)
+  // are pushed apart along the line between them, step by step, until nothing overlaps; the numbers behind
+  // them do not change
+  const q = pts.map((p) => [...p]);
+  for (let it = 0; it < 200; it++) {
     let moved = false;
     for (let i = 0; i < q.length; i++) for (let j = i + 1; j < q.length; j++) {
+      if (!overlap(q[i], shapes[i], q[j], shapes[j])) continue;
       let dx = q[j][0] - q[i][0], dy = q[j][1] - q[i][1], d = Math.hypot(dx, dy);
-      if (d >= 1) continue;
-      if (d < 1e-3) { dx = 1; dy = 0; d = 1e-3; }
-      const k = (1 - d) / 2 / d;
+      if (d < 1e-3) { dx = 1; dy = 0; d = 1; }
+      const k = 0.25 / d;
       q[i][0] -= dx * k; q[i][1] -= dy * k; q[j][0] += dx * k; q[j][1] += dy * k; moved = true;
     }
+    q.forEach((p, i) => { p[0] = clamp(p[0], shapes[i].r - 2, 82 - shapes[i].r); });    // stay on the pitch
     if (!moved) break;
   }
-  return q.map(([x, y]) => [x * w, y * h]);
+  return q;
 }
 
 function place(svg, pos) {
   // move the existing nodes (no re-render, so a drag in progress keeps its element) and redraw the ghosts
   let ghosts = "";
-  const [w, h] = $(".node.pic", svg) ? [2.5 * FACE.r, 2.7 * FACE.r] : [10.5, 7];
-  const shown = declutter(pos.map((p) => P(...p)), w, h), base = declutter(S.base.map((p) => P(...p)), w, h);
+  const shapes = nodeShapes(svg);
+  const shown = declutter(pos.map((p) => P(...p)), shapes), base = declutter(S.base.map((p) => P(...p)), shapes);
   S.club.slots.forEach((s, i) => {
     const [x, y] = shown[i], [bx, by] = base[i];
     $(`.node[data-i="${i}"]`, svg).setAttribute("transform", `translate(${x},${y})`);
@@ -527,7 +548,7 @@ function rawValue(m, v) {
 // Transfermarkt portrait, loaded from their server (today's photo, not 2016's); a silhouette when there is none
 const NO_PHOTO = `<div class="photo-none" role="img" aria-label="Нет фото"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>нет фото</div>`;
 function photo(p) {
-  return `<figure class="photo">${p.photo ? `<img src="${esc(p.photo)}" alt="Фото: ${esc(p.name)}" referrerpolicy="no-referrer">` : NO_PHOTO}</figure>`;
+  return `<figure class="photo">${p.photo ? `<img src="${esc(p.photo)}" alt="Фото: ${esc(p.name)}">` : NO_PHOTO}</figure>`;
 }
 
 function panelPlayer(el) {
